@@ -1,0 +1,99 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no" />
+<title>JARVIS — Phone Camera Link</title>
+<style>
+  * { margin:0; padding:0; box-sizing:border-box; }
+  html,body { background:#03070b; color:#00e5ff; font-family:"Consolas",monospace; height:100%; }
+  body { display:flex; flex-direction:column; align-items:center; justify-content:center; gap:14px; padding:16px; }
+  h1 { letter-spacing:4px; font-size:18px; color:#fff; text-shadow:0 0 10px #00e5ff; }
+  video { width:88vw; max-width:420px; aspect-ratio:3/4; object-fit:cover; border:1px solid #0a3a44; border-radius:10px; background:#000; transform:scaleX(-1); }
+  button { font-family:inherit; background:#00e5ff; color:#03070b; border:none; padding:12px 22px; border-radius:24px; font-size:14px; letter-spacing:1px; cursor:pointer; box-shadow:0 0 18px #00e5ff; }
+  button:disabled { opacity:.4; box-shadow:none; }
+  #status { font-size:12px; min-height:18px; text-align:center; padding:0 10px; opacity:.9; }
+  .hint { font-size:11px; opacity:.6; max-width:420px; text-align:center; line-height:1.5; }
+  #qr { font-size:12px; word-break:break-all; opacity:.7; text-align:center; }
+</style>
+</head>
+<body>
+  <h1>J.A.R.V.I.S · PHONE CAM</h1>
+  <video id="local" autoplay playsinline muted></video>
+  <button id="link">LINK TO PC</button>
+  <div id="status">Open this page on your phone over LAN, then tap LINK.</div>
+  <div class="hint">This page streams your camera to the PC running index-advanced.html via WebRTC (signaling over ws://&lt;PC-IP&gt;:8001). Both devices must be on the same Wi-Fi.</div>
+  <div id="qr"></div>
+
+<script>
+const SIGNAL = (location.protocol === 'https:' ? 'wss://' : 'ws://') + location.hostname + ':8001';
+const ROOM = 'jarvis';
+const statusEl = document.getElementById('status');
+const video = document.getElementById('local');
+const linkBtn = document.getElementById('link');
+document.getElementById('qr').textContent = 'signaling: ' + SIGNAL;
+
+let pc = null, ws = null, stream = null, role = null;
+
+async function link() {
+  linkBtn.disabled = true;
+  statusEl.textContent = 'Requesting camera…';
+  try {
+    stream = await navigator.mediaDevices.getUserMedia({
+      video: { width: { ideal: 1920 }, height: { ideal: 1080 }, frameRate: { ideal: 60, max: 60 }, facingMode: { ideal: 'environment' } },
+      audio: false
+    });
+    video.srcObject = stream;
+  } catch (e) {
+    statusEl.textContent = 'CAMERA ERROR: ' + e.message;
+    linkBtn.disabled = false; return;
+  }
+
+  statusEl.textContent = 'Connecting signaling…';
+  ws = new WebSocket(SIGNAL);
+  ws.onopen = () => ws.send(JSON.stringify({ type: 'join', room: ROOM }));
+  ws.onmessage = (ev) => onSignal(JSON.parse(ev.data));
+  ws.onerror = () => { statusEl.textContent = 'Signaling connection failed (is node signaling.js running on :8001?)'; linkBtn.disabled = false; };
+}
+
+async function onSignal(msg) {
+  if (msg.type === 'joined') { role = msg.role; statusEl.textContent = 'Joined as ' + role + ' · waiting for peer…'; }
+  else if (msg.type === 'room-full') { statusEl.textContent = 'Room full (2 peers max).'; ws.close(); linkBtn.disabled = false; }
+  else if (msg.type === 'peer-ready') { statusEl.textContent = 'Peer ready · negotiating…'; await makeOffer(); }
+  else if (msg.type === 'signal') {
+    const data = msg.data;
+    if (data.sdp) {
+      await pc.setRemoteDescription(new RTCSessionDescription(data.sdp));
+      if (data.sdp.type === 'offer') {
+        const answer = await pc.createAnswer();
+        await pc.setLocalDescription(answer);
+        ws.send(JSON.stringify({ type: 'signal', data: { sdp: pc.localDescription } }));
+      }
+    } else if (data.candidate) {
+      try { await pc.addIceCandidate(new RTCIceCandidate(data.candidate)); } catch (_) {}
+    }
+  }
+  else if (msg.type === 'peer-left') { statusEl.textContent = 'PC disconnected.'; if (pc) pc.close(); pc = null; }
+}
+
+async function makeOffer() {
+  pc = new RTCPeerConnection({ iceServers: [{ urls: 'stun:stun.l.google.com:19302' }] });
+  stream.getTracks().forEach((t) => pc.addTrack(t, stream));
+
+  pc.onicecandidate = (e) => {
+    if (e.candidate) ws.send(JSON.stringify({ type: 'signal', data: { candidate: e.candidate } }));
+  };
+  pc.onconnectionstatechange = () => {
+    if (pc.connectionState === 'connected') statusEl.textContent = '● LIVE — streaming to PC';
+    else if (['failed','disconnected','closed'].includes(pc.connectionState)) statusEl.textContent = 'Link ' + pc.connectionState;
+  };
+
+  const offer = await pc.createOffer();
+  await pc.setLocalDescription(offer);
+  ws.send(JSON.stringify({ type: 'signal', data: { sdp: pc.localDescription } }));
+}
+
+linkBtn.addEventListener('click', link);
+</script>
+</body>
+</html>

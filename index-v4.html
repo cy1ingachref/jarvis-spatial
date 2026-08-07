@@ -1,0 +1,531 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>JARVIS — v4 Object ID + 3D Proxy (live camera background)</title>
+<style>
+  :root { --hud:#00e5ff; --hud-dim:#0a3a44; }
+  * { margin:0; padding:0; box-sizing:border-box; }
+  html,body { width:100%; height:100%; overflow:hidden; background:#03070b; font-family:"Consolas","Menlo",monospace; color:var(--hud); }
+
+  /* full-screen live camera background */
+  #cam, #phoneimg, #rtc {
+    position:fixed; inset:0; width:100%; height:100%; object-fit:cover;
+    transform:scaleX(-1); z-index:0; background:#000;
+  }
+  #phoneimg, #rtc { display:none; }
+  #scene { position:fixed; inset:0; z-index:1; }
+  /* hand skeleton + object boxes drawn full-screen, over the camera */
+  #overlay { position:fixed; inset:0; width:100%; height:100%; transform:scaleX(-1); z-index:2; pointer-events:none; }
+
+  #hud { position:fixed; left:14px; top:14px; z-index:3; padding:12px 14px; border:1px solid var(--hud-dim); border-radius:8px; background:rgba(3,12,16,0.55); backdrop-filter:blur(3px); line-height:1.6; font-size:13px; min-width:262px; }
+  #hud h1 { font-size:15px; letter-spacing:3px; margin-bottom:8px; color:#fff; text-shadow:0 0 8px var(--hud); }
+  .row { display:flex; justify-content:space-between; }
+  .key { color:#6fd6e6; } .val { color:#fff; font-weight:bold; }
+  .legend { margin-top:10px; padding-top:8px; border-top:1px solid var(--hud-dim); font-size:11px; color:#8fd; opacity:0.85; }
+  #objlist { margin-top:8px; max-height:150px; overflow:auto; font-size:11px; color:#9fe; }
+  #objlist div { padding:1px 0; }
+  #panel { position:fixed; left:14px; bottom:14px; z-index:3; padding:10px 12px; border:1px solid var(--hud-dim); border-radius:8px; background:rgba(3,12,16,0.6); font-size:12px; width:332px; }
+  #panel input { width:100%; background:#02141a; border:1px solid var(--hud-dim); color:#9fe; padding:6px; border-radius:5px; font-family:inherit; margin:4px 0; }
+  #panel button { font-family:inherit; background:#0a3a44; color:var(--hud); border:1px solid var(--hud); padding:6px 8px; border-radius:5px; cursor:pointer; margin:3px 2px 0 0; }
+  #panel button:hover { background:var(--hud); color:#03070b; }
+  #panel button.on { background:var(--hud); color:#03070b; }
+  #voice { margin-top:6px; color:#9fe; min-height:16px; font-size:12px; }
+  #start { position:fixed; inset:0; display:flex; align-items:center; justify-content:center; flex-direction:column; gap:16px; background:radial-gradient(circle at 50% 40%, #07212b 0%, #03070b 70%); z-index:5; }
+  #start button { font-family:inherit; font-size:16px; letter-spacing:2px; color:#03070b; background:var(--hud); border:none; padding:14px 34px; border-radius:30px; cursor:pointer; box-shadow:0 0 24px var(--hud); }
+  #start button:hover { background:#fff; }
+  #start p { max-width:620px; text-align:center; line-height:1.6; font-size:13px; color:#9fe; }
+  #start h2 { letter-spacing:6px; font-size:26px; color:#fff; text-shadow:0 0 14px var(--hud); }
+  #status { margin-top:6px; font-size:12px; color:#ffb347; max-width:620px; text-align:center; }
+  .tag { display:inline-block; padding:1px 6px; border:1px solid var(--hud); border-radius:4px; font-size:10px; color:var(--hud); margin-right:4px; }
+</style>
+</head>
+<body>
+<!-- live camera background layers (only one visible at a time) -->
+<video id="cam" autoplay playsinline muted></video>
+<img id="phoneimg" alt="phone cam" />
+<video id="rtc" autoplay playsinline muted></video>
+
+<div id="scene"></div>
+<canvas id="overlay"></canvas>
+
+<div id="hud">
+  <h1>J.A.R.V.I.S <span style="font-size:10px;color:#6fd6e6">v4</span></h1>
+  <div class="row"><span class="key">HANDS</span><span class="val" id="g-hands">0</span></div>
+  <div class="row"><span class="key">OBJECTS</span><span class="val" id="g-obj">0</span></div>
+  <div class="row"><span class="key">SELECTED</span><span class="val" id="g-sel">none</span></div>
+  <div class="row"><span class="key">VOICE</span><span class="val" id="g-voice">off</span></div>
+  <div class="row"><span class="key">CAM</span><span class="val" id="g-cam">—</span></div>
+  <div id="objlist">scanning…</div>
+  <div class="legend">
+    <span class="tag">ID</span>COCO-SSD detects what's in front → builds a labeled 3D proxy<br/>
+    <span class="tag">POINT</span>aim index finger at an object<br/>
+    <span class="tag">TAP</span>quick pinch = grab that object<br/>
+    <span class="tag">CONTROL</span>L move · R pinch scale · R fist rotate · tap empty = release<br/>
+    Voice: "identify", "scan", "select cup", "release", "reset"
+  </div>
+</div>
+
+<div id="panel">
+  <div><b>CAMERA SOURCE (PC webcam default)</b></div>
+  <button id="useWebcam" class="on">PC WEBCAM</button>
+  <button id="usePhone">PHONE MJPEG</button>
+  <button id="useRTC" style="background:#ff7a18;border-color:#ff7a18;color:#03070b">PHONE WEBRTC</button>
+  <input id="phoneUrl" placeholder="http://192.168.x.x:8080/video (MJPEG)" />
+  <div style="margin-top:6px"><b>SMART</b></div>
+  <button id="scanBtn">SCAN / SPEAK</button>
+  <button id="idBtn">IDENTIFY</button>
+  <button id="resetObjs">RESET OBJECTS</button>
+  <div id="voice">voice: idle</div>
+</div>
+
+<div id="start">
+  <h2>J.A.R.V.I.S v4</h2>
+  <p>Real object identification, projected over your live camera. COCO-SSD sees what's in front of it, builds a
+     labeled 3D version you can grab with your hand and control. Stable MediaPipe hand tracking.
+     Serve over http://localhost: run <b>python -m http.server</b> here, open http://localhost:8000/index-v4.html</p>
+  <button id="startBtn">INITIATE LINK</button>
+  <div id="status"></div>
+</div>
+
+<script crossorigin="anonymous" src="https://cdn.jsdelivr.net/npm/@mediapipe/hands@0.4/hands.js" onerror="document.getElementById('status').textContent='FAILED to load MediaPipe Hands CDN'"></script>
+<script crossorigin="anonymous" src="https://cdn.jsdelivr.net/npm/@mediapipe/drawing_utils@0.3/drawing_utils.js" onerror="document.getElementById('status').textContent='FAILED to load MediaPipe drawing_utils CDN'"></script>
+<!-- Object detection: load TF.js + coco-ssd as UMD (reliable, single shared globals) -->
+<script crossorigin="anonymous" src="https://cdn.jsdelivr.net/npm/@tensorflow/tfjs@4.22.0/dist/tf.min.js" onerror="document.getElementById('status').textContent='FAILED to load tfjs CDN'"></script>
+<script crossorigin="anonymous" src="https://cdn.jsdelivr.net/npm/@tensorflow-models/coco-ssd@2.2.3/dist/coco-ssd.min.js" onerror="document.getElementById('status').textContent='FAILED to load coco-ssd CDN'"></script>
+
+<script type="importmap">
+{ "imports": {
+  "three": "https://cdn.jsdelivr.net/npm/three@0.160.0/build/three.module.js",
+  "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.160.0/examples/jsm/"
+} }
+</script>
+
+<script type="module">
+function status(t){ const el=document.getElementById('status'); if(el) el.textContent=t; }
+window.addEventListener('error', e=> status('JS ERROR: '+(e.message||e.error)));
+window.addEventListener('unhandledrejection', e=> status('PROMISE ERR: '+((e.reason&&e.reason.message)||e.reason)));
+
+import * as THREE from 'three';
+
+/* ---------- scene (transparent so camera shows through) ---------- */
+const sceneEl=document.getElementById('scene');
+const scene=new THREE.Scene();
+const camera3d=new THREE.PerspectiveCamera(68, innerWidth/innerHeight, 0.1, 100);
+camera3d.position.set(0,0,14);
+const renderer=new THREE.WebGLRenderer({antialias:true, alpha:true});
+renderer.setClearColor(0x000000, 0);            // transparent background
+renderer.setSize(innerWidth,innerHeight);
+renderer.setPixelRatio(Math.min(devicePixelRatio,2));
+sceneEl.appendChild(renderer.domElement);
+scene.add(new THREE.AmbientLight(0x223344,0.8));
+const l1=new THREE.PointLight(0x00e5ff,1.7,60); l1.position.set(5,6,9); scene.add(l1);
+const l2=new THREE.PointLight(0xff7a18,1.1,60); l2.position.set(-6,-4,6); scene.add(l2);
+/* faint floor grid for spatial anchoring (over the video) */
+const grid=new THREE.GridHelper(50,50,0x0a5a66,0x07343c); grid.position.y=-4.5; grid.material.transparent=true; grid.material.opacity=0.35; scene.add(grid);
+const objGroup=new THREE.Group(); scene.add(objGroup);
+
+/* ---------- helpers ---------- */
+const lerp=(a,b,t)=>a+(b-a)*t;
+const clamp=(v,lo,hi)=>Math.max(lo,Math.min(hi,v));
+const dist=(a,b)=>Math.hypot(a.x-b.x,a.y-b.y,(a.z||0)-(b.z||0));
+function worldSizeAtZ0(){ const visH=2*camera3d.position.z*Math.tan(THREE.MathUtils.degToRad(camera3d.fov/2)); const visW=visH*(innerWidth/innerHeight); return {w:visW,h:visH}; }
+const toWorldX=nx=>(nx-0.5)*worldSizeAtZ0().w;
+const toWorldY=ny=>-(ny-0.5)*worldSizeAtZ0().h;
+
+const PALETTE={person:0x9fd8e6,car:0x9aa3ad,truck:0x9aa3ad,bus:0x9aa3ad,bicycle:0x444444,motorcycle:0x444444,bottle:0x2f6f5f,cup:0x6b4f3a,book:0x7a3b2e,laptop:0x3a3f47,keyboard:0x2b2f36,cell:0x1c1c1c,chair:0x6b4f3a,couch:0x4a5a6a,potted:0x3b6b3b,dog:0x8a6a4a,cat:0x9a8a7a};
+const colorFor=l=>PALETTE[l]??0x8aa0aa;
+/* solid, believable PBR material (no hologram transparency) */
+function realMat(label){ return new THREE.MeshStandardMaterial({ color:colorFor(label), metalness:0.35, roughness:0.55, emissive:colorFor(label), emissiveIntensity:0.0 }); }
+let videoTexCache=null;
+function getVideoTexture(){
+  const el=activeEl();
+  if(!videoTexCache){ videoTexCache=new THREE.VideoTexture(el); videoTexCache.minFilter=THREE.LinearFilter; videoTexCache.colorSpace=THREE.SRGBColorSpace; }
+  return videoTexCache;
+}
+/* build a realistic, bbox-proportioned 3D form for the detected object.
+   Returns a Group: solid body + a live camera-texture face (real image). */
+function realisticMesh(label,w,h,bbox,imgW,imgH){
+  const g=new THREE.Group();
+  const mat=realMat(label);
+  const bodyW=w, bodyH=h, bodyD=clamp(Math.min(w,h)*0.5,0.3,1.6);
+  let body;
+  if(['bottle','cup','vase','wine'].includes(label)){
+    body=new THREE.Mesh(new THREE.CylinderGeometry(bodyW*0.32, bodyW*0.42, bodyH, 24), mat);
+    const neck=new THREE.Mesh(new THREE.CylinderGeometry(bodyW*0.16, bodyW*0.3, bodyH*0.32, 20), mat);
+    neck.position.y=bodyH*0.62; g.add(neck);
+  } else if(['book','laptop','keyboard','tie','suitcase','skateboard'].includes(label)){
+    body=new THREE.Mesh(new THREE.BoxGeometry(bodyW, bodyH*0.12, bodyD*0.8), mat);
+    if(label==='laptop'){ const screen=new THREE.Mesh(new THREE.BoxGeometry(bodyW*0.96, bodyH*0.7, 0.04), realMat('laptop')); screen.position.set(0, bodyH*0.4, -bodyD*0.36); screen.rotation.x=-0.25; g.add(screen); }
+  } else if(['car','truck','bus','refrigerator'].includes(label)){
+    body=new THREE.Mesh(new THREE.BoxGeometry(bodyW, bodyH*0.55, bodyD*1.4), mat);
+    const cabin=new THREE.Mesh(new THREE.BoxGeometry(bodyW*0.7, bodyH*0.4, bodyD*1.1), mat); cabin.position.y=bodyH*0.45; g.add(cabin);
+  } else if(label==='person'){
+    body=new THREE.Mesh(new THREE.CapsuleGeometry(bodyW*0.3, bodyH*0.7, 8, 16), mat);
+  } else {
+    body=new THREE.Mesh(new THREE.BoxGeometry(bodyW, bodyH, bodyD), mat);
+  }
+  g.add(body);
+  /* live camera image on the front face → literally shows the real object */
+  try{
+    const vt=getVideoTexture().clone(); vt.needsUpdate=true;
+    const bw=bbox[2]/imgW, bh=bbox[3]/imgH;
+    vt.repeat.set(bw, bh);
+    vt.offset.set(bbox[0]/imgW, 1-(bbox[1]+bbox[3])/imgH);
+    const face=new THREE.Mesh(new THREE.PlaneGeometry(bodyW*0.98, bodyH*0.98),
+      new THREE.MeshBasicMaterial({ map:vt, transparent:false }));
+    face.position.z=bodyD*0.5+0.02;
+    g.add(face);
+  }catch(_){}
+  g.userData.baseBody=body;
+  return g;
+}
+
+/* ---------- detected-object store ---------- */
+let objects=[];
+let selected=null, hover=null, scanMode=false, scanIdx=0, lastScan=0;
+const raycaster=new THREE.Raycaster();
+
+/* ---------- VOICE-GATED MODE STATE ---------- */
+let detectMode=false;   // camera only runs coco-ssd after "detect"
+let locked=false;       // "lock" -> black screen, only the 3D object shows
+
+function setDetect(on){
+  detectMode=on;
+  document.getElementById('g-voice').textContent = on?'detect ON':'off';
+  status(on ? 'DETECT MODE ON — scanning for objects…' : 'detect mode off');
+  if(on){ if(!detectLoop.busy) detectLoop(); }
+}
+function lockView(){
+  if(objects.length===0){ status('nothing to lock — say "detect" first'); return; }
+  locked=true;
+  // black everything except the 3D object
+  video.style.display='none'; phoneimg.style.display='none'; document.getElementById('rtc').style.display='none';
+  overlay.style.display='none'; grid.visible=false;
+  document.getElementById('hud').style.opacity='0'; document.getElementById('panel').style.opacity='0';
+  document.getElementById('hud').style.pointerEvents='none'; document.getElementById('panel').style.pointerEvents='none';
+  renderer.setClearColor(0x000000, 1);   // opaque black background
+  document.getElementById('g-voice').textContent='LOCKED';
+  status('LOCKED — controlling object in 3D (say "unlock" to return)');
+  speak('Locked. The object is now in 3D. Control it with your hand.');
+}
+function unlockView(){
+  locked=false;
+  video.style.display = (mode==='webcam')?'block':'none';
+  phoneimg.style.display = (mode==='phone')?'block':'none';
+  document.getElementById('rtc').style.display = (mode==='rtc')?'block':'none';
+  overlay.style.display='block'; grid.visible=true;
+  document.getElementById('hud').style.opacity='1'; document.getElementById('panel').style.opacity='1';
+  document.getElementById('hud').style.pointerEvents='auto'; document.getElementById('panel').style.pointerEvents='auto';
+  renderer.setClearColor(0x000000, 0);   // transparent again
+  document.getElementById('g-voice').textContent = detectMode?'detect ON':'off';
+  status('unlocked — live camera restored');
+}
+
+/* ---------- speech recognition (voice commands) ---------- */
+let recog=null;
+function initVoice(){
+  const SR=window.SpeechRecognition||window.webkitSpeechRecognition;
+  if(!SR){ status('speech recognition not supported in this browser (use buttons)'); return; }
+  recog=new SR(); recog.continuous=true; recog.interimResults=false; recog.lang='en-US';
+  recog.onresult=ev=>{
+    const txt=ev.results[ev.results.length-1][0].transcript.trim().toLowerCase();
+    document.getElementById('voice').textContent='heard: '+txt;
+    if(txt.includes('detect')){ setDetect(true); }
+    else if(txt.includes('lock')){ lockView(); }
+    else if(txt.includes('unlock')){ unlockView(); }
+    else if(txt.includes('scan')){ scanMode=!scanMode; status('SCAN '+(scanMode?'ON':'OFF')); if(scanMode)lastScan=0; }
+    else if(txt.includes('reset')){ objects.forEach(o=>o.mesh.position.set(0,0,0)); objGroup.position.set(0,0,0); objGroup.scale.setScalar(1); rotY=rotX=0; targetScale=1; status('objects reset'); }
+    else if(txt.includes('identify')||txt.includes('what')){ const o=hover?objects.find(x=>x.mesh===hover):null; if(o) speak(o.label+' detected'); else speak('I see '+objects.length+' object'+(objects.length===1?'':'s')+(objects.length?': '+objects.map(x=>x.label).join(', '):'')); }
+  };
+  recog.onerror=()=>{};
+  try{ recog.start(); document.getElementById('g-voice').textContent='listening'; }catch(_){}
+}
+
+function upsertObject(label,score,bbox,imgW,imgH){
+  const cx=(bbox[0]+bbox[2]/2)/imgW, cy=(bbox[1]+bbox[3]/2)/imgH;
+  const wWorld=clamp((bbox[2]/imgW)*worldSizeAtZ0().w,0.4,3.2);
+  const hWorld=clamp((bbox[3]/imgH)*worldSizeAtZ0().h,0.4,3.2);
+  const wx=toWorldX(cx), wy=toWorldY(cy);
+  let o=objects.find(o=>o.label===label);        // ONE proxy per class — never duplicate
+  if(!o){
+    const mesh=realisticMesh(label,wWorld,hWorld,bbox,imgW,imgH);
+    mesh.position.set(wx,wy,0); mesh.scale.setScalar(1);
+    mesh.userData.part={label:label.toUpperCase(),fn:'detected object'};
+    mesh.userData.basePos={x:wx,y:wy};
+    o={label,score,mesh,seen:performance.now()}; objects.push(o); objGroup.add(mesh);
+  } else {
+    o.seen=performance.now(); o.score=score; o.bbox=bbox;
+    o.mesh.position.set(wx,wy,0);                 // track if it moved, but keep single instance
+  }
+}
+function pruneObjects(){
+  if(detectMode) return;   // after a single scan, keep the object until cleared
+  const now=performance.now();
+  objects=objects.filter(o=>{ if(now-o.seen>1600){ objGroup.remove(o.mesh); o.mesh.traverse(n=>{ if(n.geometry)n.geometry.dispose(); if(n.material)n.material.dispose(); }); if(selected===o.mesh) deselect(); return false; } return true; });
+}
+function findObj(name){ name=name.toLowerCase(); return objects.find(o=>o.label.toLowerCase().includes(name)); }
+
+function selectObj(o){ selected=o.mesh; document.getElementById('g-sel').textContent=o.label.toUpperCase(); speak(o.label+', detected in front of the camera.'); }
+function deselect(){ if(!selected) return; selected=null; document.getElementById('g-sel').textContent='none'; speak('Object released'); }
+
+/* ---------- gesture state ---------- */
+const RANGE=6.0, SMOOTH=0.5, PINCH_ON=0.06, PINCH_OFF=0.09, FIST_ON=0.18, FIST_OFF=0.26;
+const SCALE_MIN=0.3, SCALE_MAX=3.2, TAP_MS=260;
+let hands={}, prevModes={L:null,R:null}, pinchT={L:0,R:0};
+let rotY=0, rotX=0, scale=1, targetScale=1, refDist=0.1, refScale=1, prevWx=null, prevWy=null;
+
+function procHand(lm,side){
+  const wrist=lm[0]; const pinch=dist(lm[4],lm[8]);
+  const tips=[8,12,16,20]; let f=0; tips.forEach(t=>f+=dist(lm[t],wrist)); f/=tips.length;
+  const sx=lerp(hands[side]?.sx??wrist.x,wrist.x,SMOOTH);
+  const sy=lerp(hands[side]?.sy??wrist.y,wrist.y,SMOOTH);
+  const pinchS=lerp(hands[side]?.pinch??0.15,pinch,0.5);
+  const fistS=lerp(hands[side]?.fist??0.4,f,0.5);
+  let mode=hands[side]?.mode||'OPEN';
+  if(mode!=='PINCH'&&pinchS<PINCH_ON){mode='PINCH';refDist=Math.max(pinchS,0.02);refScale=targetScale;}
+  else if(mode==='PINCH'&&pinchS>PINCH_OFF){mode='OPEN';}
+  if(mode!=='FIST'&&fistS<FIST_ON&&mode!=='PINCH'){mode='FIST';prevWx=sx;prevWy=sy;}
+  else if(mode==='FIST'&&fistS>FIST_OFF){mode='OPEN';}
+  return {sx,sy,ix:1-lm[8].x,iy:lm[8].y,pinch:pinchS,fist:fistS,mode};
+}
+function detectTaps(){
+  ['L','R'].forEach(side=>{ const h=hands[side]; if(!h) return; const pm=prevModes[side];
+    if(h.mode==='PINCH'&&pm!=='PINCH') pinchT[side]=performance.now();
+    if(h.mode!=='PINCH'&&pm==='PINCH'){ if(performance.now()-pinchT[side]<TAP_MS){ if(hover) selectObj(objects.find(o=>o.mesh===hover)); else deselect(); } }
+    prevModes[side]=h.mode; });
+}
+function updateRay(){
+  hover=null;
+  if(scanMode){ const now=performance.now(); if(now-lastScan>1200){ lastScan=now; if(objects.length){ scanIdx=(scanIdx+1)%objects.length; hover=objects[scanIdx].mesh; speak(objects[scanIdx].label); } } else hover=objects[scanIdx]?.mesh||null; return; }
+  const h=hands.L||hands.R; if(!h) return;
+  const ndcX=h.ix*2-1, ndcY=-(h.iy*2-1);
+  raycaster.setFromCamera({x:ndcX,y:ndcY},camera3d);
+  const hits=raycaster.intersectObjects(objGroup.children,false);
+  if(hits.length) hover=hits[0].object;
+}
+function applyGesture(){
+  const L=hands.L, R=hands.R;
+  if(L){
+    if(selected){ selected.position.x=lerp(selected.position.x,toWorldX(L.sx),0.3); selected.position.y=lerp(selected.position.y,toWorldY(L.sy),0.3); document.getElementById('g-sel').textContent='MOVING '+selected.userData.part.label; }
+    else { const tx=(L.sx-0.5)*RANGE, ty=-(L.sy-0.5)*RANGE*0.8; objGroup.position.x=lerp(objGroup.position.x,tx,0.3); objGroup.position.y=lerp(objGroup.position.y,ty,0.3); }
+  }
+  if(R){
+    if(R.mode==='PINCH'){ targetScale=clamp(refScale*(R.pinch/refDist),SCALE_MIN,SCALE_MAX); }
+    else if(R.mode==='FIST'){ if(prevWx!==null){ rotY+=(R.sx-prevWx)*9; rotX+=(R.sy-prevWy)*9; } prevWx=R.sx;prevWy=R.sy; }
+    else { rotY=lerp(rotY,0,0.08); rotX=lerp(rotX,0,0.08); }
+    if(selected){ selected.userData.rotY=rotY; selected.userData.rotX=rotX; }
+  }
+  scale=lerp(scale,targetScale,0.18);
+  if(selected){ selected.scale.setScalar(scale); selected.rotation.y=lerp(selected.rotation.y,selected.userData.rotY||0,0.4); selected.rotation.x=lerp(selected.rotation.x,selected.userData.rotX||0,0.4); }
+  else { objGroup.scale.setScalar(scale); objGroup.rotation.y=lerp(objGroup.rotation.y,rotY,0.4); objGroup.rotation.x=lerp(objGroup.rotation.x,rotX,0.4); }
+  if(!L&&!R&&!selected){ rotY+=0.0035; }
+}
+function applyHL(){
+  objGroup.children.forEach(m=>{
+    const body=m.userData.baseBody; if(!body) return;      // only tint the solid body, not the video face
+    if(m===selected){ body.material.emissive.set(0xff7a18); body.material.emissiveIntensity=0.6; }
+    else if(m===hover){ body.material.emissive.set(0x00e5ff); body.material.emissiveIntensity=0.5; }
+    else { body.material.emissive.set(colorFor(m.userData.part.label.toLowerCase())); body.material.emissiveIntensity=0.0; }
+  });
+}
+function speak(t){ try{ const u=new SpeechSynthesisUtterance(t); u.rate=1.0;u.pitch=0.9; speechSynthesis.speak(u); }catch(_){} }
+
+/* ---------- camera + hands ---------- */
+const video=document.getElementById('cam'), phoneimg=document.getElementById('phoneimg'), overlay=document.getElementById('overlay'), octx=overlay.getContext('2d');
+function sizeOverlay(){ overlay.width=innerWidth; overlay.height=innerHeight; }
+sizeOverlay();
+let mp4Hands=null, coco=null, handBusy=false, lastHandTs=0, lastLandmarks=null, lastPreds=null, lastPredsWH={w:1,h:1};
+let camStream=null, mode='webcam';
+
+function activeEl(){ return mode==='webcam'?video : mode==='phone'?phoneimg : document.getElementById('rtc'); }
+
+function initHands(){
+  if(!window.Hands){ status('MediaPipe Hands not loaded (CDN blocked)'); return; }
+  status('loading hand model…');
+  mp4Hands=new window.Hands({ locateFile:(f)=>`https://cdn.jsdelivr.net/npm/@mediapipe/hands@0.4/${f}` });
+  mp4Hands.setOptions({ maxNumHands:2, modelComplexity:1, minDetectionConfidence:0.7, minTrackingConfidence:0.7 });
+  mp4Hands.onResults(onHandResults);
+  status('hand model ready ✓');
+}
+function onHandResults(res){
+  const list=(res.multiHandLandmarks||[]);
+  lastLandmarks=list;
+  hands={};
+  if(list.length){
+    const arr=list.map(lm=>{ const cx=1-lm[0].x; return {lm,cx}; }).sort((a,b)=>a.cx-b.cx);
+    arr.forEach((h,i)=>{ hands[i===0?'L':'R']=procHand(h.lm,i===0?'L':'R'); });
+    if(list.length===1){ hands.L=procHand(list[0],'L'); hands.R=null; }
+  }
+  detectTaps();
+  document.getElementById('g-hands').textContent=(hands.L?1:0)+(hands.R?1:0);
+}
+function drawOverlay(){
+  octx.clearRect(0,0,overlay.width,overlay.height);
+  if(lastPreds){ const {w,h}=lastPredsWH;
+    lastPreds.filter(p=>p.score>0.45).forEach(p=>{
+      const x=p.bbox[0]/w*overlay.width, y=p.bbox[1]/h*overlay.height, bw=p.bbox[2]/w*overlay.width, bh=p.bbox[3]/h*overlay.height;
+      octx.strokeStyle='#00e5ff'; octx.lineWidth=3; octx.strokeRect(x,y,bw,bh);
+      octx.fillStyle='#00e5ff'; octx.font='14px monospace'; octx.fillText(p.class+' '+(p.score*100|0)+'%', x+4, Math.max(16,y-5));
+    });
+  }
+  if(lastLandmarks){ lastLandmarks.forEach(lm=>{
+    octx.strokeStyle='#ff7a18'; octx.lineWidth=3;
+    const C=[[0,1],[1,2],[2,3],[3,4],[0,5],[5,6],[6,7],[7,8],[5,9],[9,10],[10,11],[11,12],[9,13],[13,14],[14,15],[15,16],[13,17],[17,18],[18,19],[19,20],[0,17]];
+    C.forEach(([a,b])=>{ octx.beginPath(); octx.moveTo(lm[a].x*overlay.width,lm[a].y*overlay.height); octx.lineTo(lm[b].x*overlay.width,lm[b].y*overlay.height); octx.stroke(); });
+    lm.forEach(p=>{ octx.fillStyle='#9fe'; octx.beginPath(); octx.arc(p.x*overlay.width,p.y*overlay.height,3,0,7); octx.fill(); });
+  }); }
+}
+
+async function frameLoop(){
+  requestAnimationFrame(frameLoop);
+  const el=activeEl(); if(!el) return;
+  if(el.readyState<2 && !el.complete) return;
+  const now=performance.now();
+  if(mp4Hands && !handBusy && now-lastHandTs>33){
+    lastHandTs=now; handBusy=true;
+    try{ await mp4Hands.send({ image: el }); }catch(_){}
+    handBusy=false;
+  }
+}
+/* non-max suppression: drop weaker boxes that overlap a stronger one of the SAME class */
+function nms(preds, iouThr=0.5){
+  const keep=[]; const sorted=preds.slice().sort((a,b)=>b.score-a.score);
+  const used=new Array(sorted.length).fill(false);
+  for(let i=0;i<sorted.length;i++){
+    if(used[i]) continue;
+    keep.push(sorted[i]); used[i]=true;
+    const a=sorted[i].bbox;
+    for(let j=i+1;j<sorted.length;j++){
+      if(used[j]||sorted[j].class!==sorted[i].class) continue;
+      const b=sorted[j].bbox;
+      const xa=Math.max(a[0],b[0]), ya=Math.max(a[1],b[1]);
+      const xb=Math.min(a[0]+a[2],b[0]+b[2]), yb=Math.min(a[1]+a[3],b[1]+b[3]);
+      const iw=Math.max(0,xb-xa), ih=Math.max(0,yb-ya);
+      const inter=iw*ih, uni=a[2]*a[3]+b[2]*b[3]-inter;
+      if(uni>0 && inter/uni>iouThr) used[j]=true;
+    }
+  }
+  return keep;
+}
+async function detectLoop(){
+  if(!coco){ return setTimeout(detectLoop,1000); }
+  if(!detectMode){ setTimeout(detectLoop,400); return; }   // idle until "detect"
+  const el=activeEl(); if(!el){ return setTimeout(detectLoop,500); }
+  const w=el.videoWidth||el.naturalWidth||0, h=el.videoHeight||el.naturalHeight||0;
+  if(w<32||h<32){ return setTimeout(detectLoop,250); }
+  if(!(el.readyState>=2 || el.complete)){ return setTimeout(detectLoop,250); }
+  try{
+    detectLoop.busy=true;
+    const raw=await coco.detect(el);
+    const kept=nms(raw.filter(p=>p.score>=0.40), 0.5);
+    lastPreds=kept; lastPredsWH={w,h};
+    kept.forEach(p=>upsertObject(p.class,p.score,p.bbox,w,h));
+    pruneObjects();
+    const list=document.getElementById('objlist');
+    list.innerHTML = objects.length? objects.map(o=>`<div>▸ ${o.label} ${(o.score*100|0)}%</div>`).join('') : 'none detected — move object into frame / closer';
+    document.getElementById('g-obj').textContent=objects.length;
+    if(!detectLoop.ran){ detectLoop.ran=true; }
+    if(objects.length){
+      status('SCAN COMPLETE ✓ found '+objects.length+' object(s): '+objects.map(o=>o.label).join(', ')+'. Say "lock" to enter 3D.');
+      speak('Scan complete. '+objects.length+' object captured.');
+      setDetect(false);   // single scan only — stop after first success
+    } else {
+      status('nothing found — move the object into frame, then say "detect" again');
+    }
+  }catch(err){ status('detect error: '+(err&&err.message?err.message:err)); }
+  finally{ detectLoop.busy=false; }
+  setTimeout(detectLoop,500);
+}
+/* one-time self-test: prove the model can actually run on a blank canvas */
+async function verifyDetector(){
+  try{
+    const c=document.createElement('canvas'); c.width=320; c.height=240;
+    const cx=c.getContext('2d'); cx.fillStyle='#222'; cx.fillRect(0,0,320,240);
+    const t=performance.now(); await coco.detect(c);
+    console.log('detector self-test OK in', Math.round(performance.now()-t),'ms');
+  }catch(e){ console.error('detector self-test FAILED:', e); status('detector self-test FAILED: '+(e&&e.message||e)); }
+}
+async function initCoco(){
+  status('loading object detector… (first load downloads ~model weights)');
+  try{
+    if(!window.cocoSsd){ status('coco-ssd global MISSING — CDN blocked; identification off, hands still work'); return; }
+    if(!window.tf){ status('tf global MISSING — coco-ssd will fail'); return; }
+    // force a backend we control; webgl is fast, cpu is slow-but-works
+    try{
+      await window.tf.setBackend('webgl'); await window.tf.ready();
+      status('tf backend: webgl (GPU)');
+    }catch(e){
+      try{ await window.tf.setBackend('cpu'); await window.tf.ready(); status('tf backend: cpu (slow but works)'); }
+      catch(_){ status('tf backend init failed'); }
+    }
+    coco = await window.cocoSsd.load();
+    status('object detector loaded ✓ (weights ready)');
+    verifyDetector();
+    detectLoop();
+  }catch(e){
+    console.error('coco-ssd init failed:', e);
+    status('object detector FAILED: '+(e && e.message ? e.message : e)+' — hands still work');
+  }
+}
+
+/* ---------- sources ---------- */
+function markSource(b){ ['useWebcam','usePhone','useRTC'].forEach(id=>document.getElementById(id).classList.remove('on')); b.classList.add('on'); videoTexCache=null; }
+document.getElementById('useWebcam').onclick=e=>{ markSource(e.target); mode='webcam'; phoneimg.style.display='none'; document.getElementById('rtc').style.display='none'; video.style.display='block'; if(camStream){ video.srcObject=camStream; video.play().catch(()=>{}); document.getElementById('g-cam').textContent='webcam'; } };
+document.getElementById('usePhone').onclick=e=>{ markSource(e.target); const u=document.getElementById('phoneUrl').value.trim(); if(!u){status('enter phone URL');return;} mode='phone'; phoneimg.src=u; phoneimg.style.display='block'; video.style.display='none'; document.getElementById('rtc').style.display='none'; document.getElementById('g-cam').textContent='phone'; status('phone cam linked'); };
+document.getElementById('useRTC').onclick=e=>{ markSource(e.target); startRTC(); };
+document.getElementById('scanBtn').onclick=()=>{ scanMode=!scanMode; status('SCAN '+(scanMode?'ON':'OFF')); if(scanMode)lastScan=0; };
+document.getElementById('idBtn').onclick=()=>{ setDetect(true); };   // "detect" by button
+// add LOCK / UNLOCK buttons
+const panel=document.getElementById('panel');
+const lockBtn=document.createElement('button'); lockBtn.textContent='LOCK 3D'; lockBtn.style.background='#00e5ff'; lockBtn.style.color='#03070b';
+lockBtn.onclick=()=>lockView();
+const unlockBtn=document.createElement('button'); unlockBtn.textContent='UNLOCK'; unlockBtn.onclick=()=>unlockView();
+panel.appendChild(lockBtn); panel.appendChild(unlockBtn);
+document.getElementById('resetObjs').onclick=()=>{ objects.forEach(o=>{ const bp=o.mesh.userData.basePos; if(bp) o.mesh.position.set(bp.x,bp.y,0); o.mesh.rotation.set(0,0,0); o.mesh.scale.setScalar(1); }); objGroup.position.set(0,0,0); objGroup.scale.setScalar(1); rotY=rotX=0; targetScale=1; status('objects reset to scanned position'); };
+
+/* WebRTC receiver */
+let rtcPc=null, rtcWs=null;
+function startRTC(){ status('RTC: connecting…'); const SIG=(location.protocol==='https:'?'wss://':'ws://')+location.hostname+':8001';
+  rtcWs=new WebSocket(SIG); rtcWs.onopen=()=>rtcWs.send(JSON.stringify({type:'join',room:'jarvis'}));
+  rtcWs.onmessage=async ev=>{ const m=JSON.parse(ev.data);
+    if(m.type==='joined') status('RTC joined '+m.role+' · open phone.html, tap LINK');
+    else if(m.type==='signal'){ const d=m.data; if(d.sdp){ if(!rtcPc) makeRtcPc(); await rtcPc.setRemoteDescription(new RTCSessionDescription(d.sdp));
+      if(d.sdp.type==='offer'){ const a=await rtcPc.createAnswer(); await rtcPc.setLocalDescription(a); rtcWs.send(JSON.stringify({type:'signal',data:{sdp:rtcPc.localDescription}})); } }
+      else if(d.candidate){ try{await rtcPc.addIceCandidate(new RTCIceCandidate(d.candidate));}catch(_){} } }
+    else if(m.type==='peer-left') status('RTC: phone gone'); };
+  rtcWs.onerror=()=>status('RTC failed (run node signaling.js on :8001)'); }
+function makeRtcPc(){ const v=document.getElementById('rtc'); v.style.display='block'; v.style.position='fixed'; v.style.inset='0'; v.style.width='100%'; v.style.height='100%'; v.style.objectFit='cover'; v.style.transform='scaleX(-1)'; v.style.zIndex='0';
+  rtcPc=new RTCPeerConnection({iceServers:[{urls:'stun:stun.l.google.com:19302'}]});
+  rtcPc.ontrack=e=>{ v.srcObject=e.streams[0]; v.play().catch(()=>{}); mode='rtc'; phoneimg.style.display='none'; video.style.display='none'; document.getElementById('g-cam').textContent='phone-rtc'; };
+  rtcPc.onicecandidate=e=>{ if(e.candidate) rtcWs.send(JSON.stringify({type:'signal',data:{candidate:e.candidate}})); };
+  rtcPc.onconnectionstatechange=()=>{ if(rtcPc.connectionState==='connected') status('RTC ✓ phone stream live'); }; }
+
+/* ---------- render loop ---------- */
+function animate(){ requestAnimationFrame(animate); updateRay(); applyGesture(); applyHL(); drawOverlay(); renderer.render(scene,camera3d); }
+animate();
+
+/* ---------- start ---------- */
+let started=false;
+document.getElementById('startBtn').addEventListener('click', async ()=>{
+  if(started) return; started=true;
+  status('Requesting PC webcam…');
+  try{
+    camStream=await navigator.mediaDevices.getUserMedia({
+      video:{ width:{ideal:1280}, height:{ideal:720}, facingMode:'user',
+        advanced:[{fov:90}] }, audio:false });
+    video.srcObject=camStream; await video.play().catch(()=>{}); mode='webcam';
+    document.getElementById('g-cam').textContent='webcam';
+    initHands();
+    await initCoco();
+    frameLoop();
+    initVoice();
+    status('LINK ESTABLISHED ✓  Say "detect" to scan, "lock" to enter 3D');
+    document.getElementById('start').style.display='none';
+  }catch(e){ status('CAMERA ERROR: '+e.message+' — serve over http://localhost (or allow camera permission)'); }
+});
+addEventListener('resize',()=>{ camera3d.aspect=innerWidth/innerHeight; camera3d.updateProjectionMatrix(); renderer.setSize(innerWidth,innerHeight); sizeOverlay(); });
+</script>
+</body>
+</html>

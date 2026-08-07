@@ -1,0 +1,434 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>JARVIS — Spatial Interface v2 (Two-Hand / Voice / Phone-Cam)</title>
+<style>
+  :root { --hud:#00e5ff; --hud-dim:#0a3a44; }
+  * { margin:0; padding:0; box-sizing:border-box; }
+  html,body { width:100%; height:100%; overflow:hidden; background:#03070b; font-family:"Consolas","Menlo",monospace; color:var(--hud); }
+  #scene { position:fixed; inset:0; z-index:1; }
+  #cam, #overlay { position:fixed; top:14px; right:14px; width:260px; height:195px; border:1px solid var(--hud-dim); border-radius:8px; z-index:3; background:#000; }
+  #cam { transform:scaleX(-1); object-fit:cover; }
+  #overlay { transform:scaleX(-1); pointer-events:none; }
+  #phoneimg { position:fixed; top:14px; right:14px; width:260px; height:195px; object-fit:cover; transform:scaleX(-1); border:1px solid var(--hud-dim); border-radius:8px; z-index:2; display:none; background:#000; }
+  #hud { position:fixed; left:14px; top:14px; z-index:3; padding:12px 14px; border:1px solid var(--hud-dim); border-radius:8px; background:rgba(3,12,16,0.55); backdrop-filter:blur(3px); line-height:1.7; font-size:13px; min-width:248px; }
+  #hud h1 { font-size:15px; letter-spacing:3px; margin-bottom:8px; color:#fff; text-shadow:0 0 8px var(--hud); }
+  .row { display:flex; justify-content:space-between; }
+  .key { color:#6fd6e6; } .val { color:#fff; font-weight:bold; }
+  .legend { margin-top:10px; padding-top:8px; border-top:1px solid var(--hud-dim); font-size:11.5px; color:#8fd; opacity:0.85; }
+  #panel { position:fixed; left:14px; bottom:14px; z-index:3; padding:10px 12px; border:1px solid var(--hud-dim); border-radius:8px; background:rgba(3,12,16,0.6); font-size:12px; width:300px; }
+  #panel input { width:100%; background:#02141a; border:1px solid var(--hud-dim); color:#9fe; padding:6px; border-radius:5px; font-family:inherit; margin:4px 0; }
+  #panel button { font-family:inherit; background:#0a3a44; color:var(--hud); border:1px solid var(--hud); padding:6px 10px; border-radius:5px; cursor:pointer; margin:3px 2px 0 0; }
+  #panel button:hover { background:var(--hud); color:#03070b; }
+  #voice { margin-top:6px; color:#9fe; min-height:16px; font-size:12px; }
+  #start { position:fixed; inset:0; z-index:5; display:flex; align-items:center; justify-content:center; flex-direction:column; gap:16px; background:radial-gradient(circle at 50% 40%, #07212b 0%, #03070b 70%); }
+  #start button { font-family:inherit; font-size:16px; letter-spacing:2px; color:#03070b; background:var(--hud); border:none; padding:14px 34px; border-radius:30px; cursor:pointer; box-shadow:0 0 24px var(--hud); }
+  #start button:hover { background:#fff; }
+  #start p { max-width:560px; text-align:center; line-height:1.6; font-size:13px; color:#9fe; }
+  #start h2 { letter-spacing:6px; font-size:26px; color:#fff; text-shadow:0 0 14px var(--hud); }
+  #status { margin-top:6px; font-size:12px; color:#ffb347; max-width:560px; text-align:center; }
+  .tag { display:inline-block; padding:1px 6px; border:1px solid var(--hud); border-radius:4px; font-size:10px; color:var(--hud); margin-right:4px; }
+</style>
+</head>
+<body>
+<div id="scene"></div>
+<video id="cam" autoplay playsinline muted></video>
+<img id="phoneimg" alt="phone cam" />
+<canvas id="overlay" width="260" height="195"></canvas>
+
+<div id="hud">
+  <h1>J.A.R.V.I.S <span style="font-size:10px;color:#6fd6e6">v2</span></h1>
+  <div class="row"><span class="key">L-HAND</span><span class="val" id="g-lh">—</span></div>
+  <div class="row"><span class="key">R-HAND</span><span class="val" id="g-rh">—</span></div>
+  <div class="row"><span class="key">SCALE</span><span class="val" id="g-scale">1.00</span></div>
+  <div class="row"><span class="key">ROT Y</span><span class="val" id="g-rot">0°</span></div>
+  <div class="row"><span class="key">VOICE</span><span class="val" id="g-voice">off</span></div>
+  <div class="legend">
+    <span class="tag">1</span>LH move → translate<br/>
+    <span class="tag">2</span>RH pinch (4↔8) → scale<br/>
+    <span class="tag">3</span>RH fist → rotate<br/>
+    <span class="tag">4</span>Open palm → release / re-level<br/>
+    Say: "explode", "mark 42", "cyan", "rotate", "reset"
+  </div>
+</div>
+
+<video id="rtc" autoplay playsinline muted style="display:none"></video>
+<div id="panel">
+  <div><b>WIRELESS PHONE CAM</b></div>
+  <input id="phoneUrl" placeholder="http://192.168.x.x:8080/video (MJPEG)" />
+  <button id="usePhone">USE PHONE CAM</button>
+  <button id="useWebcam">USE WEBCAM</button>
+  <button id="useRTC" style="background:#ff7a18;border-color:#ff7a18;color:#03070b">WEBRTC PHONE LINK</button>
+  <div style="margin-top:6px"><b>MODEL</b></div>
+  <button id="mHelmet">HELMET (GLB)</button>
+  <button id="mReactor">ARC REACTOR</button>
+  <button id="mIco">ICOSAHEDRON</button>
+  <div style="margin-top:6px"><b>THEME / FX</b></div>
+  <button id="tCyan">CYAN</button>
+  <button id="tMark">MARK 42</button>
+  <button id="explode">EXPLODE</button>
+  <div id="voice">voice: idle</div>
+</div>
+
+<div id="start">
+  <h2>J.A.R.V.I.S v2</h2>
+  <p>Two-handed spatial control + voice + wireless phone camera. Serve over http://localhost
+     (camera needs a secure context). Run <b>python -m http.server</b> here, then open http://localhost:8000/index-advanced.html</p>
+  <button id="startBtn">INITIATE LINK</button>
+  <div id="status"></div>
+</div>
+
+<!-- Three.js r128 (UMD global THREE) -->
+<script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+<!-- GLTFLoader for r128 (non-module) -->
+<script src="https://cdn.jsdelivr.net/npm/three@0.128.0/examples/js/loaders/GLTFLoader.js"></script>
+<!-- MediaPipe Hands + camera + drawing utils -->
+<script src="https://cdn.jsdelivr.net/npm/@mediapipe/hands@0.4/hands.js" crossorigin="anonymous"></script>
+<script src="https://cdn.jsdelivr.net/npm/@mediapipe/camera_utils@0.3/camera_utils.js" crossorigin="anonymous"></script>
+<script src="https://cdn.jsdelivr.net/npm/@mediapipe/drawing_utils@0.3/drawing_utils.js" crossorigin="anonymous"></script>
+
+<script>
+/* =====================================================================
+   JARVIS v2 — Two-Hand + Voice + Phone-Cam Spatial Interface
+   Stack: Three.js (WebGL) + MediaPipe Hands + Web Speech API
+   ===================================================================== */
+
+/* ---------- 1. Three.js scene ---------- */
+const sceneEl = document.getElementById('scene');
+const scene = new THREE.Scene();
+scene.fog = new THREE.FogExp2(0x03070b, 0.04);
+
+const camera3d = new THREE.PerspectiveCamera(55, innerWidth/innerHeight, 0.1, 100);
+camera3d.position.set(0, 0, 9);
+
+const renderer = new THREE.WebGLRenderer({ antialias:true });
+renderer.setSize(innerWidth, innerHeight);
+renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
+renderer.outputEncoding = THREE.sRGBEncoding;
+sceneEl.appendChild(renderer.domElement);
+
+scene.add(new THREE.AmbientLight(0x223344, 0.7));
+const l1 = new THREE.PointLight(0x00e5ff, 1.7, 50); l1.position.set(5,6,9);  scene.add(l1);
+const l2 = new THREE.PointLight(0xff7a18, 1.1, 50); l2.position.set(-6,-4,6); scene.add(l2);
+
+const grid = new THREE.GridHelper(50, 50, 0x0a5a66, 0x07343c); grid.position.y = -4.5; scene.add(grid);
+const starGeo = new THREE.BufferGeometry(); const starPos = [];
+for (let i=0;i<700;i++) starPos.push((Math.random()-0.5)*70,(Math.random()-0.5)*45,(Math.random()-0.5)*70);
+starGeo.setAttribute('position', new THREE.Float32BufferAttribute(starPos,3));
+scene.add(new THREE.Points(starGeo, new THREE.PointsMaterial({ color:0x2a8fa6, size:0.08 })));
+
+/* ---------- 2. Holographic shader (fresnel glow) ---------- */
+function holoMaterial(color){
+  return new THREE.MeshStandardMaterial({
+    color: 0x0a5566, emissive: color, emissiveIntensity: 0.6,
+    transparent: true, opacity: 0.28, metalness: 0.4, roughness: 0.25
+  });
+}
+function wireMaterial(color){
+  return new THREE.MeshBasicMaterial({ color, wireframe:true, transparent:true, opacity:0.85 });
+}
+
+/* ---------- 3. Model builders ---------- */
+let model = new THREE.Group(); scene.add(model);
+let explodeTarget = 1, explodeAmt = 1, autoRotate = false;
+
+function clearModel(){ while(model.children.length) { const c = model.children.pop(); c.geometry && c.geometry.dispose(); } }
+
+// Arc reactor / helmet procedural (always renders, no binary needed)
+function buildReactor(){
+  clearModel();
+  const g = new THREE.Group();
+  const ring = new THREE.Mesh(new THREE.TorusGeometry(1.4,0.18,16,48), holoMaterial(0x00e5ff));
+  const ring2 = new THREE.Mesh(new THREE.TorusGeometry(0.9,0.12,16,48), wireMaterial(0x00e5ff));
+  const core = new THREE.Mesh(new THREE.IcosahedronGeometry(0.55,1), new THREE.MeshBasicMaterial({color:0xff7a18}));
+  const shell = new THREE.Mesh(new THREE.IcosahedronGeometry(1.7,1), wireMaterial(0x00e5ff));
+  const solid = new THREE.Mesh(new THREE.IcosahedronGeometry(1.7,1), holoMaterial(0x00e5ff));
+  solid.material.opacity = 0.18;
+  g.add(ring, ring2, core, shell, solid);
+  g.userData.shells = [shell, solid];
+  model.add(g);
+}
+
+// Stylized Iron-Man-ish helmet from primitives
+function buildHelmet(){
+  clearModel();
+  const g = new THREE.Group();
+  const head = new THREE.Mesh(new THREE.SphereGeometry(1.3,32,32, 0, Math.PI*2, 0, Math.PI*0.62), holoMaterial(0xff7a18));
+  const dome = new THREE.Mesh(new THREE.SphereGeometry(1.32,32,24, 0, Math.PI*2, 0, Math.PI*0.55), wireMaterial(0xff7a18));
+  const face = new THREE.Mesh(new THREE.CylinderGeometry(0.9,1.15,1.3,24,1,false,0,Math.PI), holoMaterial(0xff5a18));
+  face.rotation.z = Math.PI/2; face.rotation.y = Math.PI/2; face.position.set(0,-0.2,0.4);
+  const visor = new THREE.Mesh(new THREE.BoxGeometry(1.7,0.32,0.5), new THREE.MeshBasicMaterial({color:0x00e5ff, transparent:true, opacity:0.9}));
+  visor.position.set(0,0.05,1.1);
+  const jaw = new THREE.Mesh(new THREE.BoxGeometry(1.4,0.5,1.0), wireMaterial(0xff7a18));
+  jaw.position.set(0,-0.9,0.5);
+  g.add(head, dome, face, visor, jaw);
+  g.userData.shells = [dome, jaw];
+  model.add(g);
+}
+
+// Plain icosahedron
+function buildIco(){
+  clearModel();
+  const g = new THREE.Group();
+  const solid = new THREE.Mesh(new THREE.IcosahedronGeometry(1.7,1), holoMaterial(0x00e5ff));
+  const wire = new THREE.Mesh(new THREE.IcosahedronGeometry(1.7,1), wireMaterial(0x00e5ff));
+  const core = new THREE.Mesh(new THREE.IcosahedronGeometry(0.5,0), new THREE.MeshBasicMaterial({color:0xff7a18}));
+  g.add(solid, wire, core); g.userData.shells = [wire]; model.add(g);
+}
+
+// Load real GLB if present (graceful fallback to helmet on error)
+function loadGLB(url){
+  const loader = new THREE.GLTFLoader();
+  loader.load(url, (gltf)=>{
+    clearModel();
+    const obj = gltf.scene;
+    obj.traverse(o=>{ if(o.isMesh){ o.material.transparent = true; o.material.opacity = 0.6;
+      o.material.emissive = new THREE.Color(0x00e5ff); o.material.emissiveIntensity = 0.4; }});
+    const box = new THREE.Box3().setFromObject(obj);
+    const s = 3.2 / box.getSize(new THREE.Vector3()).length();
+    obj.scale.setScalar(s);
+    obj.position.sub(box.getCenter(new THREE.Vector3()).multiplyScalar(s));
+    const wire = new THREE.Mesh(new THREE.IcosahedronGeometry(1.9,1), wireMaterial(0x00e5ff));
+    model.add(obj); model.add(wire); model.userData.shells = [wire];
+  }, undefined, ()=>{ status('GLB not found → helmet'); buildHelmet(); });
+}
+
+buildReactor();
+
+/* ---------- 4. Gesture state + smoothing ---------- */
+const RANGE=4.4, SMOOTH=0.45, PINCH_ON=0.06, PINCH_OFF=0.085, FIST_ON=0.20, FIST_OFF=0.27;
+const SCALE_MIN=0.3, SCALE_MAX=3.0;
+const st = {
+  hands: {}, targetScale:1, scale:1, rotY:0, rotX:0,
+  refDist:0.1, refScale:1, prevWx:null, prevWy:null
+};
+const lerp=(a,b,t)=>a+(b-a)*t;
+const dist=(a,b)=>Math.hypot(a.x-b.x, a.y-b.y, (a.z||0)-(b.z||0));
+const clamp=(v,lo,hi)=>Math.max(lo,Math.min(hi,v));
+
+/* ---------- 5. MediaPipe Hands (2 hands) ---------- */
+const video = document.getElementById('cam');
+const phoneimg = document.getElementById('phoneimg');
+const overlay = document.getElementById('overlay');
+const octx = overlay.getContext('2d');
+const statusEl = document.getElementById('status');
+const voiceEl = document.getElementById('g-voice');
+function status(t){ statusEl.textContent = t; }
+
+const hands = new Hands({ locateFile:(f)=>`https://cdn.jsdelivr.net/npm/@mediapipe/hands@0.4/${f}` });
+hands.setOptions({ maxNumHands:2, modelComplexity:1, minDetectionConfidence:0.7, minTrackingConfidence:0.7 });
+hands.onResults(onResults);
+
+function onResults(res){
+  octx.clearRect(0,0,overlay.width,overlay.height);
+  const list = (res.multiHandLandmarks||[]);
+  st.hands = {};
+  if(list.length){
+    // draw
+    if(window.drawConnectors){
+      list.forEach(lm=>{ drawConnectors(octx,lm,window.HAND_CONNECTIONS,{color:'#00e5ff',lineWidth:1.5});
+        drawLandmarks(octx,lm,{color:'#ff7a18',lineWidth:1,radius:2}); });
+    }
+    // assign by mirrored display side: left-of-screen = "L" (translate), right = "R" (rotate/scale)
+    const arr = list.map(lm=>{ const cx = 1 - lm[0].x; return {lm, cx}; }).sort((a,b)=>a.cx-b.cx);
+    arr.forEach((h,i)=>{ const side = i===0 ? 'L' : 'R'; st.hands[side] = processHand(h.lm, side); });
+    if(list.length===1){ // single hand: it does everything
+      const lm = list[0]; st.hands.L = processHand(lm,'L',true); st.hands.R = null;
+    }
+  }
+  applyGesture();
+}
+
+function processHand(lm, side, solo){
+  const wrist = lm[0];
+  const pinch = dist(lm[4], lm[8]);
+  const tips=[8,12,16,20]; let f=0; tips.forEach(t=>f+=dist(lm[t],wrist)); f/=tips.length;
+  const sx = lerp(st.hands[side]?.sx ?? wrist.x, wrist.x, SMOOTH);
+  const sy = lerp(st.hands[side]?.sy ?? wrist.y, wrist.y, SMOOTH);
+  const pinchS = lerp(st.hands[side]?.pinch ?? 0.15, pinch, 0.5);
+  const fistS = lerp(st.hands[side]?.fist ?? 0.4, f, 0.5);
+  let mode = st.hands[side]?.mode || 'OPEN';
+  if(mode!=='PINCH' && pinchS<PINCH_ON){ mode='PINCH'; st.refDist=Math.max(pinchS,0.02); st.refScale=st.scale; }
+  else if(mode==='PINCH' && pinchS>PINCH_OFF){ mode='OPEN'; }
+  if(mode!=='FIST' && fistS<FIST_ON && mode!=='PINCH'){ mode='FIST'; st.prevWx=sx; st.prevWy=sy; }
+  else if(mode==='FIST' && fistS>FIST_OFF){ mode='OPEN'; }
+  return { sx, sy, pinch:pinchS, fist:fistS, mode };
+}
+
+/* ---------- 6. Map gestures → transform ---------- */
+function applyGesture(){
+  const LH = document.getElementById('g-lh'), RH = document.getElementById('g-rh');
+  const L = st.hands.L, R = st.hands.R;
+
+  if(L){
+    const tx=(0.5-L.sx)*RANGE, ty=(0.5-L.sy)*RANGE*0.8;
+    model.position.x = lerp(model.position.x, tx, 0.35);
+    model.position.y = lerp(model.position.y, ty, 0.35);
+    LH.textContent = 'MV '+L.mode;
+  } else LH.textContent='—';
+
+  if(R){
+    if(R.mode==='PINCH'){
+      st.targetScale = clamp(st.refScale*(R.pinch/st.refDist), SCALE_MIN, SCALE_MAX);
+      RH.textContent='PINCH·ZOOM';
+    } else if(R.mode==='FIST'){
+      if(st.prevWx!==null){ st.rotY += (R.sx-st.prevWx)*9.0; st.rotX += (R.sy-st.prevWy)*9.0; }
+      st.prevWx=R.sx; st.prevWy=R.sy; RH.textContent='FIST·ROT';
+    } else { st.rotY=lerp(st.rotY,0,0.08); st.rotX=lerp(st.rotX,0,0.08); RH.textContent='OPEN·REL'; }
+  } else RH.textContent='—';
+  if(!L && !R){ st.rotY += autoRotate?0.02:0.0035; }
+
+  // scale + explode + theme application
+  st.scale = lerp(st.scale, st.targetScale, 0.18);
+  model.scale.setScalar(st.scale);
+  explodeAmt = lerp(explodeAmt, explodeTarget, 0.1);
+  if(model.userData.shells) model.userData.shells.forEach(s=>{ s.scale.setScalar(explodeAmt); });
+  model.rotation.y = lerp(model.rotation.y, st.rotY, 0.4);
+  model.rotation.x = lerp(model.rotation.x, st.rotX, 0.4);
+
+  document.getElementById('g-scale').textContent = st.scale.toFixed(2);
+  document.getElementById('g-rot').textContent = (st.rotY*180/Math.PI).toFixed(0)+'°';
+}
+
+/* ---------- 7. Render loop ---------- */
+function animate(){
+  requestAnimationFrame(animate);
+  const t = performance.now()*0.002;
+  renderer.render(scene, camera3d);
+}
+animate();
+addEventListener('resize', ()=>{ camera3d.aspect=innerWidth/innerHeight; camera3d.updateProjectionMatrix(); renderer.setSize(innerWidth,innerHeight); });
+
+/* ---------- 8. Voice control (Web Speech API) ---------- */
+let recog=null;
+function initVoice(){
+  const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
+  if(!SR){ document.getElementById('voice').textContent='voice: unsupported'; return; }
+  recog = new SR(); recog.continuous=true; recog.interimResults=false; recog.lang='en-US';
+  recog.onresult = (e)=>{
+    const cmd = e.results[e.results.length-1][0].transcript.trim().toLowerCase();
+    document.getElementById('voice').textContent = '“'+cmd+'”';
+    handleVoice(cmd);
+  };
+  recog.onerror = ()=>{}; recog.onend = ()=>{ if(recog) try{recog.start();}catch(_){} };
+  try{ recog.start(); voiceEl.textContent='on'; }catch(_){}
+}
+function setColor(hex, glow){
+  l1.color.set(hex); scene.traverse(o=>{ if(o.material && o.material.emissive) o.material.emissive.set(hex);
+    if(o.material && o.material.color && o.material.wireframe) o.material.color.set(hex); });
+}
+function handleVoice(cmd){
+  if(cmd.includes('explode')){ explodeTarget = explodeTarget>1?1:1.8; }
+  else if(cmd.includes('mark 42') || cmd.includes('mark42')){ setColor(0xff7a18); }
+  else if(cmd.includes('cyan')){ setColor(0x00e5ff); }
+  else if(cmd.includes('rotate')){ autoRotate = !autoRotate; }
+  else if(cmd.includes('reset')){ st.targetScale=1; st.rotY=0; st.rotX=0; model.position.set(0,0,0); }
+  else if(cmd.includes('wire') || cmd.includes('frame')){ model.userData.shells && model.userData.shells.forEach(s=>s.visible=!s.visible); }
+  status('VOICE → '+cmd);
+}
+
+/* ---------- 9. Panel buttons ---------- */
+document.getElementById('mHelmet').onclick = ()=>loadGLB('./models/helmet.glb');
+document.getElementById('mReactor').onclick = ()=>buildReactor();
+document.getElementById('mIco').onclick = ()=>buildIco();
+document.getElementById('tCyan').onclick = ()=>setColor(0x00e5ff);
+document.getElementById('tMark').onclick = ()=>setColor(0xff7a18);
+document.getElementById('explode').onclick = ()=>{ explodeTarget = explodeTarget>1?1:1.8; };
+document.getElementById('useWebcam').onclick = ()=>{ phoneimg.style.display='none'; video.style.display='block'; useSource('webcam'); };
+document.getElementById('useRTC').onclick = ()=>{ startRTC(); };
+document.getElementById('usePhone').onclick = ()=>{
+  const url = document.getElementById('phoneUrl').value.trim();
+  if(!url){ status('enter phone cam URL'); return; }
+  phoneimg.src = url; phoneimg.style.display='block'; video.style.display='none';
+  phoneimg.onload = ()=>{ status('phone cam linked ✓'); useSource('phone'); };
+  phoneimg.onerror = ()=>status('phone cam failed (check URL / LAN)');
+};
+
+/* ---------- 10. Sources: webcam vs phone MJPEG vs WebRTC ---------- */
+const rtcVideo = document.getElementById('rtc');
+let camObj=null, phoneRaf=null, activeSource='webcam';
+let rtcPc=null, rtcWs=null;
+function useSource(src){
+  activeSource = src;
+  if(camObj){ camObj.stop(); camObj=null; }
+  if(phoneRaf){ cancelAnimationFrame(phoneRaf); phoneRaf=null; }
+  if(src==='webcam'){
+    if(!video.srcObject){ status('webcam not started'); return; }
+    camObj = new Camera(video, { onFrame: async()=>{ await hands.send({image:video}); }, width:1280, height:720 });
+    camObj.start();
+  } else if(src==='phone'){
+    phoneimg.style.display='block'; video.style.display='none'; rtcVideo.style.display='none';
+    const pump = async ()=>{ if(activeSource!=='phone') return;
+      try{ await hands.send({image:phoneimg}); }catch(_){}
+      phoneRaf = requestAnimationFrame(pump); };
+    pump();
+  } else if(src==='rtc'){
+    video.style.display='none'; phoneimg.style.display='none'; rtcVideo.style.display='none';
+    const pump = async ()=>{ if(activeSource!=='rtc') return;
+      try{ await hands.send({image:rtcVideo}); }catch(_){}
+      phoneRaf = requestAnimationFrame(pump); };
+    pump();
+  }
+}
+
+/* WebRTC receiver: connect to signaling, accept phone's offer, attach remote track */
+function startRTC(){
+  status('RTC: connecting signaling…');
+  const SIGNAL = (location.protocol==='https:'?'wss://':'ws://') + location.hostname + ':8001';
+  rtcWs = new WebSocket(SIGNAL);
+  rtcWs.onopen = ()=> rtcWs.send(JSON.stringify({ type:'join', room:'jarvis' }));
+  rtcWs.onmessage = async (ev)=>{
+    const msg = JSON.parse(ev.data);
+    if(msg.type==='joined'){ status('RTC: joined as '+msg.role+' · open phone.html on your phone and tap LINK'); }
+    else if(msg.type==='peer-ready'){ /* phone will send offer */ }
+    else if(msg.type==='room-full'){ status('RTC: room full'); }
+    else if(msg.type==='signal'){
+      const d = msg.data;
+      if(d.sdp){
+        if(!rtcPc) makeRtcPc();
+        await rtcPc.setRemoteDescription(new RTCSessionDescription(d.sdp));
+        if(d.sdp.type==='offer'){
+          const ans = await rtcPc.createAnswer();
+          await rtcPc.setLocalDescription(ans);
+          rtcWs.send(JSON.stringify({ type:'signal', data:{ sdp: rtcPc.localDescription } }));
+        }
+      } else if(d.candidate){
+        try{ await rtcPc.addIceCandidate(new RTCIceCandidate(d.candidate)); }catch(_){}
+      }
+    }
+    else if(msg.type==='peer-left'){ status('RTC: phone disconnected'); }
+  };
+  rtcWs.onerror = ()=> status('RTC: signaling failed (run `node signaling.js` on :8001)');
+}
+function makeRtcPc(){
+  rtcPc = new RTCPeerConnection({ iceServers:[{ urls:'stun:stun.l.google.com:19302' }] });
+  rtcPc.ontrack = (e)=>{ rtcVideo.srcObject = e.streams[0]; rtcVideo.play().catch(()=>{}); };
+  rtcPc.onicecandidate = (e)=>{ if(e.candidate) rtcWs.send(JSON.stringify({ type:'signal', data:{ candidate:e.candidate } })); };
+  rtcPc.onconnectionstatechange = ()=>{
+    if(rtcPc.connectionState==='connected'){
+      status('RTC ✓ 60FPS phone stream live — switch to HELMET for the GLB');
+      useSource('rtc');
+    }
+  };
+}
+
+/* ---------- 11. Start ---------- */
+let started=false;
+document.getElementById('startBtn').addEventListener('click', async ()=>{
+  if(started) return; started=true;
+  status('Requesting webcam…');
+  try{
+    const stream = await navigator.mediaDevices.getUserMedia({
+      video:{ width:{ideal:1280}, height:{ideal:720}, facingMode:'user' }, audio:false });
+    video.srcObject = stream; await video.play();
+    useSource('webcam');
+    initVoice();
+    status('LINK ESTABLISHED ✓  (two-hand / voice ready)');
+    document.getElementById('start').style.display='none';
+  }catch(e){ status('CAMERA ERROR: '+e.message+' — serve over http://localhost'); console.error(e); }
+});
+</script>
+</body>
+</html>

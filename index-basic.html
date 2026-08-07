@@ -1,0 +1,295 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>JARVIS — Webcam Spatial Interface</title>
+<style>
+  :root { --hud: #00e5ff; --hud-dim: #0a3a44; }
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  html, body { width: 100%; height: 100%; overflow: hidden; background: #03070b; font-family: "Consolas", "Menlo", monospace; color: var(--hud); }
+  #scene { position: fixed; inset: 0; z-index: 1; }
+  #cam, #overlay { position: fixed; top: 14px; right: 14px; width: 260px; height: 195px; border: 1px solid var(--hud-dim); border-radius: 8px; z-index: 3; background: #000; }
+  #cam { transform: scaleX(-1); object-fit: cover; }
+  #overlay { transform: scaleX(-1); pointer-events: none; }
+  #hud { position: fixed; left: 14px; top: 14px; z-index: 3; padding: 12px 14px; border: 1px solid var(--hud-dim); border-radius: 8px; background: rgba(3,12,16,0.55); backdrop-filter: blur(3px); line-height: 1.7; font-size: 13px; min-width: 230px; }
+  #hud h1 { font-size: 15px; letter-spacing: 3px; margin-bottom: 8px; color: #fff; text-shadow: 0 0 8px var(--hud); }
+  .row { display: flex; justify-content: space-between; }
+  .key { color: #6fd6e6; }
+  .val { color: #fff; font-weight: bold; }
+  .legend { margin-top: 10px; padding-top: 8px; border-top: 1px solid var(--hud-dim); font-size: 11.5px; color: #8fd; opacity: 0.85; }
+  #start { position: fixed; inset: 0; z-index: 5; display: flex; align-items: center; justify-content: center; flex-direction: column; gap: 18px; background: radial-gradient(circle at 50% 40%, #07212b 0%, #03070b 70%); }
+  #start button { font-family: inherit; font-size: 16px; letter-spacing: 2px; color: #03070b; background: var(--hud); border: none; padding: 14px 34px; border-radius: 30px; cursor: pointer; box-shadow: 0 0 24px var(--hud); }
+  #start button:hover { background: #fff; }
+  #start p { max-width: 520px; text-align: center; line-height: 1.6; font-size: 13px; color: #9fe; }
+  #start h2 { letter-spacing: 6px; font-size: 26px; color: #fff; text-shadow: 0 0 14px var(--hud); }
+  #status { margin-top: 6px; font-size: 12px; color: #ffb347; }
+</style>
+</head>
+<body>
+<div id="scene"></div>
+<video id="cam" autoplay playsinline muted></video>
+<canvas id="overlay" width="260" height="195"></canvas>
+
+<div id="hud">
+  <h1>J.A.R.V.I.S</h1>
+  <div class="row"><span class="key">GESTURE</span><span class="val" id="g-gesture">IDLE</span></div>
+  <div class="row"><span class="key">POS X</span><span class="val" id="g-x">0.00</span></div>
+  <div class="row"><span class="key">POS Y</span><span class="val" id="g-y">0.00</span></div>
+  <div class="row"><span class="key">SCALE</span><span class="val" id="g-scale">1.00</span></div>
+  <div class="row"><span class="key">ROT Y</span><span class="val" id="g-rot">0.0</span></div>
+  <div class="legend">
+    MOVE HAND → translate<br/>
+    PINCH (4↔8) → scale<br/>
+    CLOSED FIST → rotate<br/>
+    OPEN PALM → release / re-level
+  </div>
+</div>
+
+<div id="start">
+  <h2>J.A.R.V.I.S</h2>
+  <p>Spatial hand interface. Allow webcam access, then control the hologram with your hand.
+     Serve this file over http://localhost (camera needs a secure context). If opened via file://, use:
+     <b>python -m http.server</b> in this folder, then visit http://localhost:8000</p>
+  <button id="startBtn">INITIATE LINK</button>
+  <div id="status"></div>
+</div>
+
+<!-- Three.js (UMD global THREE) -->
+<script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+<!-- MediaPipe Hands + camera + drawing utils (UMD globals) -->
+<script src="https://cdn.jsdelivr.net/npm/@mediapipe/hands@0.4/hands.js" crossorigin="anonymous"></script>
+<script src="https://cdn.jsdelivr.net/npm/@mediapipe/camera_utils@0.3/camera_utils.js" crossorigin="anonymous"></script>
+<script src="https://cdn.jsdelivr.net/npm/@mediapipe/drawing_utils@0.3/drawing_utils.js" crossorigin="anonymous"></script>
+
+<script>
+/* ============================================================
+   JARVIS — Webcam Spatial Interface
+   Stack: Three.js (WebGL) + MediaPipe Hands
+   Gestures:
+     - Move hand (wrist L0)            -> translate
+     - Pinch (thumb-tip L4 ↔ index-tip L8) -> scale
+     - Closed fist (fingertips→palm)   -> grab & rotate
+     - Open palm                       -> release & re-level
+   ============================================================ */
+
+/* ---------- 1. Three.js scene ---------- */
+const sceneEl = document.getElementById('scene');
+const scene = new THREE.Scene();
+scene.fog = new THREE.FogExp2(0x03070b, 0.045);
+
+const camera3d = new THREE.PerspectiveCamera(55, window.innerWidth / window.innerHeight, 0.1, 100);
+camera3d.position.set(0, 0, 9);
+
+const renderer = new THREE.WebGLRenderer({ antialias: true, alpha: false });
+renderer.setSize(window.innerWidth, window.innerHeight);
+renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+sceneEl.appendChild(renderer.domElement);
+
+/* Lighting — Iron Man cyan + arc-reactor orange */
+scene.add(new THREE.AmbientLight(0x223344, 0.6));
+const l1 = new THREE.PointLight(0x00e5ff, 1.6, 40); l1.position.set(5, 6, 8);  scene.add(l1);
+const l2 = new THREE.PointLight(0xff7a18, 1.1, 40); l2.position.set(-6, -4, 6); scene.add(l2);
+
+/* Hologram object: layered icosahedron (solid translucent + wireframe glow) */
+const holo = new THREE.Group();
+const geo = new THREE.IcosahedronGeometry(1.6, 1);
+const solid = new THREE.Mesh(geo, new THREE.MeshStandardMaterial({
+  color: 0x0a5566, emissive: 0x00b4d8, emissiveIntensity: 0.55,
+  transparent: true, opacity: 0.25, metalness: 0.4, roughness: 0.3, wireframe: false
+}));
+const wire = new THREE.Mesh(geo, new THREE.MeshBasicMaterial({ color: 0x00e5ff, wireframe: true, transparent: true, opacity: 0.85 }));
+const core = new THREE.Mesh(new THREE.IcosahedronGeometry(0.5, 0),
+  new THREE.MeshBasicMaterial({ color: 0xff7a18 }));
+holo.add(solid); holo.add(wire); holo.add(core);
+scene.add(holo);
+
+/* Grid + starfield ambiance */
+const grid = new THREE.GridHelper(40, 40, 0x0a5a66, 0x07343c);
+grid.position.y = -4; scene.add(grid);
+const starGeo = new THREE.BufferGeometry();
+const starPos = [];
+for (let i = 0; i < 600; i++) starPos.push((Math.random()-0.5)*60, (Math.random()-0.5)*40, (Math.random()-0.5)*60);
+starGeo.setAttribute('position', new THREE.Float32BufferAttribute(starPos, 3));
+scene.add(new THREE.Points(starGeo, new THREE.PointsMaterial({ color: 0x2a8fa6, size: 0.08 })));
+
+/* ---------- 2. Gesture state + low-pass smoothing ---------- */
+const RANGE = 4.4;                       // world units of travel
+const SMOOTH = 0.45;                     // EMA factor (lower = smoother/slower)
+const PINCH_ON = 0.06;                   // normalized 4↔8 distance to enter pinch
+const PINCH_OFF = 0.085;
+const FIST_ON = 0.20;                    // mean fingertip→wrist distance to enter fist
+const FIST_OFF = 0.27;
+const SCALE_MIN = 0.3, SCALE_MAX = 3.0;
+
+const st = {
+  hand: false,
+  mode: 'OPEN',                          // OPEN | PINCH | FIST
+  sx: 0, sy: 0,                          // smoothed wrist (mirrored-ready, raw 0..1)
+  pinch: 0.15,                           // smoothed pinch distance
+  fist: 0.4,                             // smoothed fist metric
+  scale: 1, targetScale: 1,
+  rotY: 0, rotX: 0,
+  prevWx: null, prevWy: null,            // for fist delta rotation
+  refDist: 0.1, refScale: 1              // pinch zoom reference
+};
+
+function lerp(a, b, t) { return a + (b - a) * t; }
+function dist(a, b) { const dx = a.x - b.x, dy = a.y - b.y, dz = (a.z||0)-(b.z||0); return Math.hypot(dx, dy, dz); }
+function clamp(v, lo, hi) { return Math.max(lo, Math.min(hi, v)); }
+
+/* ---------- 3. MediaPipe Hands ---------- */
+const video = document.getElementById('cam');
+const overlay = document.getElementById('overlay');
+const octx = overlay.getContext('2d');
+const statusEl = document.getElementById('status');
+
+const hands = new Hands({
+  locateFile: (file) => `https://cdn.jsdelivr.net/npm/@mediapipe/hands@0.4/${file}`
+});
+hands.setOptions({
+  maxNumHands: 1,
+  modelComplexity: 1,
+  minDetectionConfidence: 0.7,
+  minTrackingConfidence: 0.7
+});
+hands.onResults(onResults);
+
+function onResults(res) {
+  octx.clearRect(0, 0, overlay.width, overlay.height);
+  if (res.multiHandLandmarks && res.multiHandLandmarks.length > 0) {
+    const lm = res.multiHandLandmarks[0];
+    st.hand = true;
+
+    // draw landmarks (cyan) for the JARVIS feel
+    if (window.drawConnectors) {
+      drawConnectors(octx, lm, window.HAND_CONNECTIONS, { color: '#00e5ff', lineWidth: 1.5 });
+      drawLandmarks(octx, lm, { color: '#ff7a18', lineWidth: 1, radius: 2 });
+    }
+
+    // raw metrics
+    const wrist = lm[0];
+    const pinchRaw = dist(lm[4], lm[8]);
+    const tips = [8, 12, 16, 20];
+    let f = 0; for (const t of tips) f += dist(lm[t], wrist); f /= tips.length;
+
+    // low-pass (EMA) smoothing of tracking jitter
+    st.sx = lerp(st.sx, wrist.x, SMOOTH);
+    st.sy = lerp(st.sy, wrist.y, SMOOTH);
+    st.pinch = lerp(st.pinch, pinchRaw, 0.5);
+    st.fist = lerp(st.fist, f, 0.5);
+
+    // gesture state machine with hysteresis
+    if (st.mode !== 'PINCH' && st.pinch < PINCH_ON) {
+      st.mode = 'PINCH'; st.refDist = Math.max(st.pinch, 0.02); st.refScale = st.scale;
+    } else if (st.mode === 'PINCH' && st.pinch > PINCH_OFF) {
+      st.mode = 'OPEN';
+    }
+    if (st.mode !== 'FIST' && st.fist < FIST_ON && st.mode !== 'PINCH') {
+      st.mode = 'FIST'; st.prevWx = st.sx; st.prevWy = st.sy;
+    } else if (st.mode === 'FIST' && st.fist > FIST_OFF) {
+      st.mode = 'OPEN';
+    }
+  } else {
+    st.hand = false;
+    st.mode = 'OPEN';
+  }
+  applyGesture();
+}
+
+/* ---------- 4. Map gestures → object transform ---------- */
+function applyGesture() {
+  const g = {
+    gesture: document.getElementById('g-gesture'),
+    x: document.getElementById('g-x'),
+    y: document.getElementById('g-y'),
+    scale: document.getElementById('g-scale'),
+    rot: document.getElementById('g-rot')
+  };
+
+  if (st.hand) {
+    // translate: mirror X (webcam is mirrored), invert Y (image Y is downward)
+    const tx = (0.5 - st.sx) * RANGE;
+    const ty = (0.5 - st.sy) * RANGE * 0.8;
+    holo.position.x = lerp(holo.position.x, tx, 0.35);
+    holo.position.y = lerp(holo.position.y, ty, 0.35);
+
+    if (st.mode === 'PINCH') {
+      // zoom: scale proportional to pinch distance vs reference at pinch start
+      const s = st.refScale * (st.pinch / st.refDist);
+      st.targetScale = clamp(s, SCALE_MIN, SCALE_MAX);
+      g.gesture.textContent = 'PINCH · ZOOM';
+    } else if (st.mode === 'FIST') {
+      // grab & rotate: wrist horizontal motion → Y rotation, vertical → X rotation
+      if (st.prevWx !== null) {
+        const dx = st.sx - st.prevWx;
+        const dy = st.sy - st.prevWy;
+        st.rotY += dx * 9.0;
+        st.rotX += dy * 9.0;
+      }
+      st.prevWx = st.sx; st.prevWy = st.sy;
+      g.gesture.textContent = 'FIST · ROTATE';
+    } else { // OPEN palm → release & re-level orientation
+      st.rotY = lerp(st.rotY, 0, 0.08);
+      st.rotX = lerp(st.rotX, 0, 0.08);
+      g.gesture.textContent = 'OPEN · RELEASE';
+    }
+  } else {
+    st.rotY += 0.0035; // idle ambiance
+    g.gesture.textContent = 'IDLE';
+  }
+
+  // smooth scale toward target
+  st.scale = lerp(st.scale, st.targetScale, 0.18);
+  holo.scale.setScalar(st.scale);
+  holo.rotation.y = lerp(holo.rotation.y, st.rotY, 0.4);
+  holo.rotation.x = lerp(holo.rotation.x, st.rotX, 0.4);
+
+  // HUD
+  g.x.textContent = holo.position.x.toFixed(2);
+  g.y.textContent = holo.position.y.toFixed(2);
+  g.scale.textContent = st.scale.toFixed(2);
+  g.rot.textContent = (st.rotY * 180 / Math.PI).toFixed(0) + '°';
+}
+
+/* ---------- 5. Render loop ---------- */
+function animate() {
+  requestAnimationFrame(animate);
+  // gentle core pulse
+  const t = performance.now() * 0.002;
+  core.scale.setScalar(1 + Math.sin(t) * 0.15);
+  renderer.render(scene, camera3d);
+}
+animate();
+
+window.addEventListener('resize', () => {
+  camera3d.aspect = window.innerWidth / window.innerHeight;
+  camera3d.updateProjectionMatrix();
+  renderer.setSize(window.innerWidth, window.innerHeight);
+});
+
+/* ---------- 6. Start (needs user gesture + camera) ---------- */
+document.getElementById('startBtn').addEventListener('click', async () => {
+  statusEl.textContent = 'Requesting webcam…';
+  try {
+    const stream = await navigator.mediaDevices.getUserMedia({
+      video: { width: { ideal: 1280 }, height: { ideal: 720 }, facingMode: 'user' }, audio: false
+    });
+    video.srcObject = stream;
+    await video.play();
+
+    const cam = new Camera(video, {
+      onFrame: async () => { await hands.send({ image: video }); },
+      width: 1280, height: 720
+    });
+    cam.start();
+    statusEl.textContent = 'LINK ESTABLISHED ✓';
+    document.getElementById('start').style.display = 'none';
+  } catch (e) {
+    statusEl.textContent = 'CAMERA ERROR: ' + e.message + ' — serve over http://localhost';
+    console.error(e);
+  }
+});
+</script>
+</body>
+</html>
